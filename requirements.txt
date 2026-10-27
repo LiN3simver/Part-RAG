@@ -1,0 +1,50 @@
+# Python 3.12.0（venv 建在 .venv/）
+#
+# 這一份是**全部**：api 需要的（requirements-api.txt）＋ 排程與入庫才需要的。
+# 開發機、worker 容器、以及任何要跑 ingest / schedule 的地方裝這一份：
+#
+#   pip install -r requirements.txt
+#
+# 只要回答問題的機器（api 容器）裝 requirements-api.txt 就好，實測 image
+# 1.12GB -> 537MB。拆的理由與注意事項寫在那個檔的開頭。
+#
+# ★ 為什麼要鎖版本
+#   這裡每個套件都在某個「行為」上被依賴，不只是「有這個 API」：
+#     - psycopg 3.x 的 GENERATED 欄位、numeric[] 回 Decimal 的行為
+#     - pgvector 對 numpy array 的 adapter（register_vector）
+#     - onnxruntime / tokenizers 算出來的**向量值本身** —— 換版本可能讓
+#       同一段文字算出不同向量，而庫裡既有的向量是舊版算的，兩邊就在不同的
+#       向量空間裡比對。這種故障不會報錯，只會讓排名慢慢變差
+#     - anthropic SDK 對 base_url / auth_token 的處理（公司 gateway 靠這個）
+#   全部不鎖的話，「重建環境」與「重現一個 bug」兩件事都不成立。
+#
+# ★ 升級流程
+#   改版本 -> pip install -r requirements.txt -> 跑驗收。
+#   動到 onnxruntime / tokenizers 時要特別確認規格檢索、相似料號、近重複鑑別力
+#   這類依賴向量的檢查 —— 它們的失敗方式是排名變動，不是拋錯。
+#   換版本之後值得重跑一次 `python -m src.evalrun`：向量的變化不會拋錯，
+#   只會讓 top-5 悄悄換人。
+#
+# ★ 這裡不再有 torch
+#   embedding 走 BGE-M3 的官方 ONNX，理由與實測數字見 src/retrieval.load_embedder。
+#   連帶效果：Dockerfile 不必再帶 `--extra-index-url .../whl/cpu`（那是為了
+#   避開 Linux PyPI 上的 CUDA 版 torch），Linux 與 Windows 裝的是同一份清單。
+#   有 GPU 的機器想用 CUDA：裝 onnxruntime-gpu 取代 onnxruntime，
+#   retrieval.embed_device() 會自己偵測到 CUDAExecutionProvider。
+
+-r requirements-api.txt
+
+# --- 以下只有排程與入庫用得到，api 不會 import ----------------------------
+# 這幾個加起來好幾百 MB，就是 api image 與 worker image 的差額。
+
+# CSV 讀寫（src/ingest.py 全量入庫、src/enrich.py 的品名變更比對）。
+# ★ enrich.py 把它放在**函式裡**而不是模組層 import，就是為了讓
+#   main -> write -> enrich 這條 api 走得到的鏈不把 pandas 拖進來。
+pandas==3.0.5
+# 展示版：公司系統對接（PLM 資料庫與圖檔 API 的客戶端套件）已移除
+
+# 工程圖內容抽取（src/pdf_ocr.py / src/drawing.py）。沒裝的話 drawing 那條路
+# 靜靜跳過，其餘照跑 —— 見 pdf_ocr.available()。
+rapidocr_onnxruntime==1.4.4
+pymupdf==1.28.0
+pdfplumber==0.11.10

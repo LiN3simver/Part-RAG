@@ -1,0 +1,15 @@
+{
+  "format": 1,
+  "protocol": "a2a/1",
+  "source_commit": "f5eed875b19c978d9b734fb5feff50c9493aeeef",
+  "sha256": "540032ddf08b0c45cbe61d4049198dbabbebb59cb38de02b19d0ecb3506826b8",
+  "files": {
+    "__init__.py": "4c5c62212063ea9e601a90c4df8dceb20d85d5ee486aa3fee35131502d4029ed",
+    "client.py": "8180fa4699aa39cf54e5aae9fc92d5f16c43535187fb6c16687a3aa50492a256",
+    "delegate.py": "6ff2b4d35c58941d709ff4bded36b21bfc1ec07a229c5bcc02908dbb6e0f38ac",
+    "envelope.py": "5af343e6fb47c118c9146f398406a796c6ea9447ec10a4c50abc96e4a0a9d0b1",
+    "gateway.py": "58f60ca239e023aaf99332176faad5e816f579915a49dab83beef6f14ddf634e",
+    "registry.py": "19638d2991d186eabcc511de868c8de9b6fb1dcecff3a7fed3c06f3aae847bde",
+    "server.py": "1249798866a1dc4d59ab3a217ba65cfb3c11cabac6fdeafb8039e4b8a9c530a7"
+  }
+}

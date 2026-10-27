@@ -1,0 +1,196 @@
+# Part-rag 完整堆疊：api（本專案，:8000）+ db（pgvector，:5434）
+# + scheduler（每天自動更新料號主檔與工程圖，見最下面那個 service）。
+#
+#   （先準備 .env：LLM_* 與 WRITE_TOKEN）
+#   bash docker/vendor_agentkit.sh     # 校驗 agentkit 快照並準備 build-info.json
+#   docker network create ragnet       # 第一次才需要，重複執行沒事
+#   docker compose up --build -d
+#
+# db 起來時是**空的**（只建表不灌資料）。語料與向量請用
+# pg_dump/pg_restore 搬過來，不要在伺服器上重跑 ingest —— 那是好幾個
+# 小時的 CPU 向量化，而且需要那台機器連得到資料來源。
+#
+# 跟 Windows 開發機上那個 partrag-pgvector 容器是兩套完全獨立的容器/volume，
+# 不會互踩，也不共用資料。同一台機器上 5434/8000 被佔用時用環境變數改 host 端
+# 埠號，不用改這個檔：
+#   DB_PORT=15434 API_PORT=18000 docker compose up -d
+#
+# ★ ragnet：跟 Agent Hub 與其他 RAG 專案共用的內部網路，讓它們用容器名字互打
+#   A2A（Agent Hub 打 http://agent-partrag:8000，不是打 host 那個對外埠）。
+#   這個網路不屬於任何一個專案，要先手動建一次：docker network create ragnet
+#   各專案分批上線、誰先跑都可以 —— 只要都掛在 ragnet 上，啟動順序不影響互相
+#   找得到彼此。RAG 後端本來就不給使用者直接連，下面的 host port 只留給人在
+#   伺服器上手動 curl 除錯，不是給 Agent Hub 打的，也不需要另開對外 port。
+x-service-logging: &service-logging
+  driver: local
+  options:
+    max-size: "10m"
+    max-file: "3"
+
+services:
+  db:
+    logging: *service-logging
+    image: pgvector/pgvector:pg18
+    # api 那邊的 restart 只有在 db 也會自己回來時才有意義：機器重開機後如果
+    # 只有 api 起來，它會卡在 depends_on / healthcheck 一直失敗重啟，看起來
+    # 「有在跑」但每一個查詢都是錯的。兩個一起設才是一個完整的修正。
+    restart: unless-stopped
+    environment:
+      POSTGRES_PASSWORD: ${PGPASSWORD:-change-me}
+      POSTGRES_DB: part_rag
+    ports:
+      - "127.0.0.1:${DB_PORT:-5434}:5432"
+    volumes:
+      # pg18 的資料掛載點是 /var/lib/postgresql，不是 .../data。掛錯的話容器會
+      # 不斷重啟，log 寫「there appears to be PostgreSQL data in ... (unused
+      # mount/volume)」。
+      - partrag-pgdata:/var/lib/postgresql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d part_rag"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  api:
+    logging: *service-logging
+    # api 與 scheduler 是**兩個 target**（見 Dockerfile 開頭）：api 只裝
+    # requirements-api.txt（537MB），scheduler 要的 pandas / OCR
+    # 那 590MB 只裝在 worker 上。兩者共用 base stage，所以兩個 image 都在的
+    # 機器上多出來的只有差額，不是再存一份。
+    build:
+      context: .
+      target: api
+    # ★ tag 一定要寫死，而且兩個 service 各自一個。
+    #   不指定 image 的話 compose 會用目錄名自動命名（part-rag-api /
+    #   part-rag-scheduler），改天有人把資料夾改名，舊 image 就變成孤兒還留在
+    #   磁碟上，而新的又要重建一次 —— 在一台只剩幾 GB 的機器上這會很痛。
+    #
+    # ★ 拆成兩個 image 之後多了一個必須知道的事：**改程式碼要兩邊都重建**。
+    #   以前兩個 service 共用一個 tag，compose 只建一次，不可能不同步。
+    #   現在 `up --build -d api` 只會重建 api，排程容器還跑著舊程式碼 ——
+    #   而它沒有版本號、log 看起來也完全正常，症狀是「明明改好了，半夜跑出來
+    #   的結果還是舊行為」。排程有啟用的機器，部署指令是：
+    #     docker compose --profile scheduler up --build -d
+    #   （不帶 --profile 的話 compose 連看都不會看 scheduler 那個 service）
+    image: partrag:latest
+    # 固定容器名。Agent Hub 用這個名字在 ragnet 上找到這支服務，對應
+    # agentkit/registry.py 的 agent_id="partrag" 與 Agent_Hub_RAG_Frontend/docker-compose.yml
+    # 的 A2A_PARTRAG_URL: http://agent-partrag:8000。改名字要兩邊一起改。
+    container_name: agent-partrag
+    # ★ 這一行原本只有下面的 scheduler 有，api 沒有 —— 很容易誤讀成「這個專案
+    #   已經有自動重啟保護」。實際上容器掛掉、docker daemon 重啟、機器重開機，
+    #   這支查詢服務都不會自己回來，要等有人發現並手動 up。
+    #   而它不對外開放（使用者只會透過 Agent Hub 間接用到），沒有人會直接來
+    #   抱怨 8000 打不開，所以「沒發現」可以持續很久 —— 姊妹專案就曾經
+    #   到要壓測時才發現服務根本沒在跑，容量是 0。
+    #   unless-stopped 而不是 always：明確 `docker compose stop` 停掉的就讓它
+    #   保持停著（維護時不會被 daemon 一直救回來），非人為的死亡才拉回來。
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      # .env 裡的 PG_DSN 指的是開發機的 127.0.0.1:5434；容器網路裡要打 service
+      # 名稱 db，所以這裡蓋掉 env_file 那一份。
+      PG_DSN: postgresql://postgres:${PGPASSWORD:-change-me}@db:5432/part_rag
+      # ★ A2A_HUB_PUBLIC_URL 刻意**不**列在這裡，由上面的 env_file（.env）提供。
+      #   寫成 `${A2A_HUB_PUBLIC_URL:-}` 的話，沒設時會用空字串**蓋掉** .env 裡
+      #   那一行（environment 的優先度高於 env_file），變成「明明填了卻沒生效」。
+      #   它決定工程圖 PDF 連結指去哪：伺服器上這個容器不對外開 port，連結指回
+      #   自己等於指到使用者的瀏覽器本機。見 src/a2a.py 的 _pdf_url()。
+    ports:
+      - "127.0.0.1:${API_PORT:-8000}:8000"
+    volumes:
+      # 執行期資料（工程圖 PDF 等附件）。沒有的話 API 照樣起得來、檢索也全部正常，
+      # 只有「開原圖」那顆按鈕會 404（見 /a2a/file/{id} 的錯誤訊息）。
+      - partrag-data:/app/data
+      # BGE-M3 權重（約 2GB）快取，不然每次重建容器都要重下載一次。
+      - partrag-hf-cache:/root/.cache/huggingface
+    depends_on:
+      db:
+        condition: service_healthy
+    networks:
+      - default
+      - ragnet
+
+  # 排程。Windows 開發機上的觸發者是工作排程器，容器裡沒有那種東西，
+  # 所以由 schedule.py 自己常駐（--daily-at）。用的是 worker image（api 的
+  # base stage 再加上排程專屬的那 590MB），BGE-M3 與 api 共用
+  # partrag-hf-cache，不會多下載一次。
+  #
+  # ★ 這個 service 有沒有**起來**，決定伺服器上的語料會不會更新。它預設是暫停的
+  #   （見下面的 profiles），所以在有人明確啟用它之前，Linux 上的 parts 與
+  #   drawings 就是 pg_restore 進去那一刻的快照 —— PLM 今天新開的料號查不到，
+  #   而畫面上完全看不出來（舊料號查得到、分類正常、回答也很流暢）。
+  #   這是刻意的取捨：寧可「知道它沒開」，也不要「以為它有開」。
+  #   /api/health 的 sync 區塊會誠實地顯示上次成功是幾小時前，那是唯一的事實來源。
+  #
+  # ★ 為什麼是獨立的 container 而不是 api 裡的一條背景執行緒
+  #   OCR 與 BGE-M3 都是 CPU 飽和型工作（README：入庫期間不要同時跑 uvicorn，
+  #   兩個行程各搶執行緒會慢 15%）。分開之後 api 仍然只做「回答問題」這件事，
+  #   排程再怎麼忙也不會讓查詢一起變慢到超時；重啟排程也不必動到服務。
+  #
+  scheduler:
+    logging: *service-logging
+    # ★ 預設**暫停**：掛了 profile 之後，`docker compose up -d` 不會建也不會起
+    #   這個容器，要用才明確叫它。理由是排程會主動對外連線（PLM 等外部
+    #   資料來源）並且會寫語料——這種事不該因為「照著文件跑了一次 up -d」
+    #   就在背後開始發生，尤其是網路還沒放行、資料來源還沒確認的時候。
+    #
+    #   要用（伺服器上線、網路確認可達之後）：
+    #     docker compose --profile scheduler up -d scheduler
+    #   要停：
+    #     docker compose stop scheduler          # 之後還能 start 回來
+    #     docker compose --profile scheduler down scheduler   # 連容器一起移除
+    #   狀態：
+    #     docker compose ps -a scheduler         # 沒起來時要加 -a 才看得到
+    #
+    #   單次手動跑一輪不需要開 profile（run 會自己帶上）：
+    #     docker compose run --rm scheduler python -m src.schedule --status
+    profiles: ["scheduler"]
+    # worker target：api 的全部再加上 pandas / OCR 與它的原生函式庫。
+    # 它以 api 的 base stage 為底，共用的 layer 不會存第二份。
+    # ★ 改程式碼要跟 api 一起重建，見 api 那邊的說明。
+    build:
+      context: .
+      target: worker
+    image: partrag-worker:latest
+    container_name: partrag-scheduler
+    env_file:
+      - .env
+    environment:
+      PG_DSN: postgresql://postgres:${PGPASSWORD:-change-me}@db:5432/part_rag
+      # ★ 沒有這一行，「每天 01:00」在容器裡是 UTC 的 01:00 ＝ 台北時間早上九點。
+      #   image 也必須有 tzdata（見 Dockerfile），否則這個值會被安靜地忽略 ——
+      #   schedule.py 的 _check_tz() 就是為了讓那種情況變成啟動失敗而不是晚 8 小時。
+      TZ: ${TZ:-Asia/Taipei}
+      # ★ 這裡不設 WARMUP：那個變數只有 main.py 的 lifespan 會讀，這個容器
+      #   跑的是 src.schedule，設了也不會有任何作用 —— 看起來像個開關、
+      #   其實是死設定，比沒有更糟。BGE-M3 由 enrich 在真的要算向量時才載。
+    # --budget 180：整輪三小時上限，到點停在整份的邊界，剩下留給明天。
+    # 沒有上限的話，某天 PLM 一次多開幾百份圖，OCR 會一路跑到白天還沒結束。
+    command: ["python", "-m", "src.schedule", "--daily-at", "${SYNC_AT:-01:00}",
+              "--budget", "${SYNC_BUDGET:-180}"]
+    volumes:
+      # 跟 api 掛同一份 /app/data：排程抓回來的附件都落在這裡，
+      # 而 api 的 /a2a/file/{id} 要送的就是這些檔案。掛不同份的話，排程抓回來
+      # 的圖 api 會 404，而資料庫裡明明有那筆紀錄。
+      - partrag-data:/app/data
+      - partrag-hf-cache:/root/.cache/huggingface
+    depends_on:
+      db:
+        condition: service_healthy
+    # 排程掛掉要自己爬起來。unless-stopped 而不是 always：人工 stop 之後
+    # 不要在下次 docker daemon 重啟時又自己跑起來。
+    restart: unless-stopped
+    # 不掛 ragnet：這個容器不提供 A2A，也沒有人會來打它。它要連的是
+    # 外部資料來源，那是走 host 網路出去的，跟 ragnet 無關。
+
+networks:
+  default:
+  ragnet:
+    external: true
+
+volumes:
+  partrag-pgdata:
+  partrag-data:
+  partrag-hf-cache:

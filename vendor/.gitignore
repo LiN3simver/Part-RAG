@@ -1,0 +1,3 @@
+# Fixed, reviewed agentkit snapshots and their lock are versioned with Part-RAG.
+__pycache__/
+*.pyc

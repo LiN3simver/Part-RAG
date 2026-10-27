@@ -1,0 +1,31 @@
+# build context 只留「跑這支服務需要的東西」。
+#
+# 特別注意排掉的兩類：
+#   .env      密鑰不烘進 image（compose 用 env_file 在**執行時**注入）。
+#   data/     執行期的語料與附件，體積大而且會變動；
+#             用 compose 的 volume 掛進 /app/data，不進 image。
+#             漏掉這行的話每次 build 都要重傳一次，而且改一份檔案就換一層。
+.venv
+venv
+__pycache__
+**/__pycache__
+*.pyc
+.pytest_cache
+.git
+.gitignore
+.claude
+.env
+data
+logs
+reports
+docs
+*.log
+*.dump
+README.md
+ARCHITECTURE.md
+docker-compose.yml
+# 部署腳本只在 host 上跑，不進 image（也不該讓它的改動使 build cache 失效）
+deploy
+.deploy
+.gitattributes
+backups

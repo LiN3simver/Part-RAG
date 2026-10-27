@@ -1,0 +1,42 @@
+# 只有「回答問題」這條路需要的東西。api 容器裝的是這一份。
+#
+# ★ 為什麼要拆
+#   照 requirements.txt 全裝的 image 是 1.12GB，其中約 590MB（pandas /
+#   rapidocr / pymupdf / pdfplumber 等）只有**排程與入庫**用得到 —— api 從頭到尾
+#   不會 import 它們。而 docker-compose.yml 裡 scheduler 掛了 profile、預設不起，
+#   所以一般部署只會建 api 這個 target：1.12GB -> 537MB（實測）。
+#   要跑排程的機器再建 worker，它以這一份為底層，共用的 layer 不會存第二份。
+#
+# ★ 這一份是**共用的版本鎖**，不是「api 專用的版本」
+#   requirements.txt 開頭就是 `-r requirements-api.txt`，所以 api 與 worker 拿到
+#   的必然是同一組版本。兩邊各寫一份的話，onnxruntime / tokenizers 有天會在
+#   api 與 worker 上不同版 —— 那表示「查詢時算的向量」與「入庫時算的向量」
+#   落在不同的向量空間裡，不會報錯，只會讓排名慢慢變差。鎖版本的理由見
+#   requirements.txt 的開頭，那段話對這一份同樣適用。
+#
+# ★ 這份清單夠不夠，原本由驗收裡的一組 import 鏈檢查守著（展示版未附測試）：
+#   逐一 import api 走得到的每一個模組，並斷言 pandas / fitz / pdfplumber /
+#   rapidocr 都**不在**模組層的 import 鏈上 —— 有人哪天在 retrieval.py 頂端加一行
+#   `import pandas`，那一組就會紅，而不是等到 build 完才發現 api image 又胖回去。
+
+fastapi==0.140.13
+uvicorn[standard]==0.51.0
+psycopg[binary,pool]==3.3.4
+pgvector==0.5.0
+# embedding：BGE-M3 的官方 ONNX（見 src/retrieval.load_embedder）。
+# 這三個取代了 sentence-transformers + torch。實測 image 2.73GB -> 1.12GB、
+# 常駐記憶體 1917MB -> 1498MB、模型載入 12.3s -> 1.4s，而向量與 torch 的
+# 逐元素誤差 max 2.9e-07、評測題 top-5 逐筆相同。
+# huggingface_hub 是 snapshot_download 用的。
+onnxruntime==1.28.0
+tokenizers==0.22.2
+numpy==2.5.1
+huggingface-hub==1.25.1
+opencc-python-reimplemented==0.1.7
+anthropic==0.120.2
+python-dotenv==1.2.2
+httpx==0.28.1
+# tqdm 給 ingest / enrich 的進度條。它在 src/enrich.py 的**模組層**被 import，
+# 而 api 走得到 enrich（main -> write -> enrich），所以它必須在這一份裡。
+# 只有 50KB，不值得為了它去改 enrich 的 import。
+tqdm==4.70.0

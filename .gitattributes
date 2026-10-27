@@ -1,0 +1,18 @@
+# 行尾規則。這台 Windows 的 core.autocrlf=true，工作目錄裡的檔案是 CRLF；
+# 沒有這份設定的話，「Linux 那邊 checkout 出來是 LF」只是因為 Linux 的 git 預設
+# core.autocrlf=false —— 是預設值幫的忙，不是保證。部署走 git 之後，伺服器上要
+# 直接 `bash deploy/apply.sh`，這件事就不能靠運氣了：shell 腳本帶著 CR 執行會噴
+# `$'\r': command not found`，而且錯誤訊息完全不像行尾問題。
+*.sh text eol=lf
+
+# 反過來，.bat **必須**是 CRLF：cmd.exe 是按 CR 切行的，存成 LF 的 .bat 每一行
+# 都會被從中間斷開解析（而且還是會執行到最後那行 python，所以很容易漏看）。
+*.bat text eol=crlf
+
+# 資料檔不要被任何行尾轉換碰到（CSV 進了 CR 之後最後一欄會多一個看不見的字元）。
+*.csv -text
+*.dump binary
+*.pdf binary
+vendor/agentkit/** text eol=lf
+vendor/agentkit.lock.json text eol=lf
+requirements-*-linux.lock text eol=lf

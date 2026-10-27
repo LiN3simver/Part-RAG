@@ -1,0 +1,19 @@
+.venv/
+__pycache__/
+*.pyc
+.env
+*.log
+reports/
+resp.json
+# 執行期的語料、附件與抽取報表，一律不進版控
+data/
+# 排程的輸出
+logs/
+
+# 伺服器端的部署紀錄與該台專屬設定（deploy/apply.sh 寫的），不進版控
+.deploy/
+build-info.json
+backups/
+
+# 本機工具設定
+.claude/
