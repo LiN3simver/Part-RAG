@@ -4,6 +4,7 @@ Run:  .venv/Scripts/python.exe -m uvicorn main:app --reload --port 8000
 """
 from __future__ import annotations
 
+import hmac
 import json
 import os
 import threading
@@ -313,7 +314,8 @@ def require_write(x_write_token: str | None = Header(default=None)) -> None:
             "detail": "寫入端點未啟用",
             "hint": "在 .env 設 WRITE_TOKEN=<夠長的隨機字串> 後重啟服務",
         })
-    if x_write_token != WRITE_TOKEN:
+    # 常數時間比較：`!=` 遇到第一個不同的字元就返回，回應時間會洩漏猜對了幾個字。
+    if not hmac.compare_digest((x_write_token or "").encode(), WRITE_TOKEN.encode()):
         raise HTTPException(401, {"detail": "X-Write-Token 不正確或未提供"})
 
 
